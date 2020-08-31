@@ -1,3 +1,4 @@
+#include <vector>
 // Declares clang::SyntaxOnlyAction.
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -85,24 +86,86 @@ CharSourceRange getFullRange(const Decl *D,
 class FindRangeVisitor : public RecursiveASTVisitor<FindRangeVisitor> {
 public:
   explicit FindRangeVisitor(const ASTContext *Context)
-    : context_(Context) {}
-  bool TraverseDecl(const Decl *D) {
-    const SourceManager *SM = &context_->getSourceManager();
+    : context_(Context), sm_(&context_->getSourceManager()) {}
+  bool TraverseDecl(const Decl *D) {;
     if (!context_) {
       llvm::outs() << "Context is NULL\n";
     } else {
-      if (D) {
-        D->dump();
-      }
-      D->getLocation().dump(*SM);
-      auto source_text = Lexer::getSourceText(getFullRange(D), *SM, LangOptions()).str();
-      llvm::outs() << source_text;
+      // if (D) {
+      //   D->dump();
+      // }
+      // D->getLocation().dump(*sm_);
+      relevant_ranges_.push_back(getFullRange(D));
     }
     RecursiveASTVisitor<FindRangeVisitor>::TraverseDecl(const_cast<Decl*>(D));
     return true;
   }
+
+  auto getSourceToRangesMap() {
+    std::unordered_map<
+        std::string,
+        VecPtrType
+    > source_to_ranges;
+    for (auto& range : relevant_ranges_) {
+      assert(range.isValid());
+      auto filename = sm_->getFilename(range.getBegin()).str();
+      if (source_to_ranges.find(filename) == source_to_ranges.end()) {
+        source_to_ranges[filename].push_back(&range);
+      } else {
+      source_to_ranges.emplace(filename, VecPtrType({&range}));
+      }
+      // it = relevant_ranges_.erase(it);
+    }
+    return source_to_ranges;
+  }
+
 private:
-  const ASTContext* context_;
+  using VecPtrType = std::vector<CharSourceRange*>;
+  const ASTContext *context_;
+  const SourceManager *sm_;
+  // FIXME: Can I use vector of references here ?
+  std::vector<CharSourceRange> relevant_ranges_;
+
+  auto mergeIntervals(VecPtrType&& ranges) {
+    VecPtrType ret;
+    std::sort(ranges.begin(), ranges.end(),
+    [] (const auto& range1, const auto& range2) {
+      return range1->getBegin() < range2->getBegin();
+    });
+    auto it = ranges.begin();
+    while (it != ranges.end()) {
+      auto range = *it;
+    // for (const auto& range : ranges) {
+      if (ret.empty() || ret.back()->getEnd() < range->getBegin()) {
+        ret.push_back(range);
+        // it = ranges.erase(it);
+      } else {
+        ret.back()->setEnd(std::max(range->getEnd(), ret.back()->getEnd()));
+        ++it;
+      }
+    }
+    return ret;
+  }
+
+public:
+  // TODO: make this automatic and private.
+  auto reduce() {
+    auto map = getSourceToRangesMap();
+    VecPtrType ret;
+    // assert(relevant_ranges_.empty());
+    for (auto& item : map) {
+      auto tmp = mergeIntervals(std::move(item.second));
+      ret.insert(ret.end(), tmp.begin(), tmp.end());
+    }
+    return ret;
+  }
+
+  void printToText () {
+    for (const auto& range : reduce()) {
+      auto source_text = Lexer::getSourceText(*range, *sm_, LangOptions()).str();
+      llvm::outs() << source_text;
+    }
+  }
 };
 
 class FunctionPrinter : public MatchFinder::MatchCallback {
@@ -111,6 +174,7 @@ public:
     const ASTContext* context = Result.Context;
     FindRangeVisitor visitor(context);
     visitor.TraverseDecl(Result.Nodes.getNodeAs<FunctionDecl>("function"));
+    visitor.printToText();
   }
 };
 

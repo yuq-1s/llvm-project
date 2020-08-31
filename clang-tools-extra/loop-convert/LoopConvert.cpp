@@ -1,4 +1,5 @@
 #include <vector>
+#include <unordered_map>
 // Declares clang::SyntaxOnlyAction.
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -101,24 +102,6 @@ public:
     return true;
   }
 
-  auto getSourceToRangesMap() {
-    std::unordered_map<
-        std::string,
-        VecPtrType
-    > source_to_ranges;
-    for (auto& range : relevant_ranges_) {
-      assert(range.isValid());
-      auto filename = sm_->getFilename(range.getBegin()).str();
-      if (source_to_ranges.find(filename) == source_to_ranges.end()) {
-        source_to_ranges[filename].push_back(&range);
-      } else {
-      source_to_ranges.emplace(filename, VecPtrType({&range}));
-      }
-      // it = relevant_ranges_.erase(it);
-    }
-    return source_to_ranges;
-  }
-
 private:
   using VecPtrType = std::vector<CharSourceRange*>;
   const ASTContext *context_;
@@ -132,27 +115,33 @@ private:
     [] (const auto& range1, const auto& range2) {
       return range1->getBegin() < range2->getBegin();
     });
-    auto it = ranges.begin();
-    while (it != ranges.end()) {
-      auto range = *it;
-    // for (const auto& range : ranges) {
+    for (const auto& range : ranges) {
       if (ret.empty() || ret.back()->getEnd() < range->getBegin()) {
         ret.push_back(range);
-        // it = ranges.erase(it);
       } else {
         ret.back()->setEnd(std::max(range->getEnd(), ret.back()->getEnd()));
-        ++it;
       }
     }
     return ret;
   }
 
-public:
-  // TODO: make this automatic and private.
+  auto getSourceToRangesMap() {
+    std::unordered_map<std::string, VecPtrType> source_to_ranges;
+    for (auto& range : relevant_ranges_) {
+      assert(range.isValid());
+      auto filename = sm_->getFilename(range.getBegin()).str();
+      if (source_to_ranges.find(filename) == source_to_ranges.end()) {
+        source_to_ranges[filename].push_back(&range);
+      } else {
+        source_to_ranges.emplace(filename, VecPtrType({&range}));
+      }
+    }
+    return source_to_ranges;
+  }
+
   auto reduce() {
     auto map = getSourceToRangesMap();
     VecPtrType ret;
-    // assert(relevant_ranges_.empty());
     for (auto& item : map) {
       auto tmp = mergeIntervals(std::move(item.second));
       ret.insert(ret.end(), tmp.begin(), tmp.end());
@@ -160,6 +149,7 @@ public:
     return ret;
   }
 
+public:
   void printToText () {
     for (const auto& range : reduce()) {
       auto source_text = Lexer::getSourceText(*range, *sm_, LangOptions()).str();

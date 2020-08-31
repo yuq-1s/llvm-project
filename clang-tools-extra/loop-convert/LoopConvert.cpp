@@ -6,6 +6,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Lex/Lexer.h"
 
 using namespace clang;
@@ -28,25 +29,6 @@ static cl::extrahelp MoreHelp("\nMore help text...\n");
 // StatementMatcher LoopMatcher =
 //   forStmt(hasLoopInit(declStmt(hasSingleDecl(varDecl(
 //     hasInitializer(integerLiteral(equals(0)))))))).bind("forLoop");
-
-StatementMatcher LoopMatcher =
-    forStmt(hasLoopInit(declStmt(
-                hasSingleDecl(varDecl(hasInitializer(integerLiteral(equals(0))))
-                                  .bind("initVarName")))),
-            hasIncrement(unaryOperator(
-                hasOperatorName("++"),
-                hasUnaryOperand(declRefExpr(
-                    to(varDecl(hasType(isInteger())).bind("incVarName")))))),
-            hasCondition(binaryOperator(
-                hasOperatorName("<"),
-                hasLHS(ignoringParenImpCasts(declRefExpr(
-                    to(varDecl(hasType(isInteger())).bind("condVarName"))))),
-                hasRHS(expr(hasType(isInteger())))))).bind("forLoop");
-
-static bool areSameVariable(const ValueDecl *First, const ValueDecl *Second) {
-  return First && Second &&
-         First->getCanonicalDecl() == Second->getCanonicalDecl();
-}
 
 // Expand to get the end location of the line where the EndLoc of the given
 // Decl.
@@ -100,42 +82,35 @@ CharSourceRange getFullRange(const Decl *D,
   return CharSourceRange::getCharRange(Full);
 }
 
-class LoopPrinter : public MatchFinder::MatchCallback {
-public :
-  virtual void run(const MatchFinder::MatchResult &Result) override {
-    ASTContext *Context = Result.Context;
-    const ForStmt *FS = Result.Nodes.getNodeAs<ForStmt>("forLoop");
-    if (!FS || !Context->getSourceManager().isWrittenInMainFile(FS->getForLoc())) {
-        return;
+class FindRangeVisitor : public RecursiveASTVisitor<FindRangeVisitor> {
+public:
+  explicit FindRangeVisitor(const ASTContext *Context)
+    : context_(Context) {}
+  bool TraverseDecl(const Decl *D) {
+    const SourceManager *SM = &context_->getSourceManager();
+    if (!context_) {
+      llvm::outs() << "Context is NULL\n";
+    } else {
+      if (D) {
+        D->dump();
+      }
+      D->getLocation().dump(*SM);
+      auto source_text = Lexer::getSourceText(getFullRange(D), *SM, LangOptions()).str();
+      llvm::outs() << source_text;
     }
-
-  const VarDecl *IncVar = Result.Nodes.getNodeAs<VarDecl>("incVarName");
-  const VarDecl *CondVar = Result.Nodes.getNodeAs<VarDecl>("condVarName");
-  const VarDecl *InitVar = Result.Nodes.getNodeAs<VarDecl>("initVarName");
-  if (!areSameVariable(IncVar, CondVar) || !areSameVariable(IncVar, InitVar)) {
-    return;
+    RecursiveASTVisitor<FindRangeVisitor>::TraverseDecl(const_cast<Decl*>(D));
+    return true;
   }
-  // Context->getSourceManager().getLocation();
-  llvm::outs() << "Potential array-based loop discovered.\n";
-  }
+private:
+  const ASTContext* context_;
 };
 
 class FunctionPrinter : public MatchFinder::MatchCallback {
 public:
   virtual void run(const MatchFinder::MatchResult &Result) override {
     const ASTContext* context = Result.Context;
-    const SourceManager* SM = &context->getSourceManager();
-    const FunctionDecl *FS = Result.Nodes.getNodeAs<FunctionDecl>("function");
-    // if (FS) {
-    //   FS->dump();
-    // }
-    if (!context) {
-      llvm::outs() << "Context is NULL\n";
-    } else {
-      // FS->getLocation().dump(SM);
-      auto source_text = Lexer::getSourceText(getFullRange(FS), *SM, LangOptions()).str();
-      llvm::outs() << source_text;
-    }
+    FindRangeVisitor visitor(context);
+    visitor.TraverseDecl(Result.Nodes.getNodeAs<FunctionDecl>("function"));
   }
 };
 
@@ -144,10 +119,8 @@ int main(int argc, const char **argv) {
   ClangTool Tool(OptionsParser.getCompilations(),
                  OptionsParser.getSourcePathList());
 
-  LoopPrinter loopPrinter;
   FunctionPrinter funcPrinter;
   MatchFinder Finder;
-  Finder.addMatcher(LoopMatcher, &loopPrinter);
   Finder.addMatcher(
     functionDecl().bind("function"),
     &funcPrinter);

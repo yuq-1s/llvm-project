@@ -90,33 +90,52 @@ public:
     : context_(Context), sm_(&context_->getSourceManager()) {}
   bool TraverseDecl(const Decl *D) {
     if (!context_) {
-      llvm::outs() << "Context is NULL\n";
+      llvm::errs() << "Context is NULL\n";
     } else {
       // if (D) {
       //   D->dump();
       // }
       // D->getLocation().dump(*sm_);
-      relevant_ranges_.push_back(getFullRange(D));
+      auto range = getFullRange(D);
+      if (!range.isValid()) {
+        D->print(llvm::errs() << "WARNING: No declaration found for ");
+        return false;
+      }
+      relevant_ranges_.push_back(range);
     }
     RecursiveASTVisitor<FindRangeVisitor>::TraverseDecl(const_cast<Decl*>(D));
     return true;
   }
 
-  bool TraverseStmt(Stmt* S) {
-    assert(S);
-    if (const auto *DRE = dyn_cast<DeclRefExpr>(S)) {
-      // DRE->dump();
-      // FIXME: LLVM ProgrammersManual says I should use InstVisitor instead?
-      const auto* D = DRE->getDecl();
-      if (const auto* FD = dyn_cast<FunctionDecl>(D)) {
-        relevant_ranges_.push_back(getFullRange(FD->getDefinition()));
-      } else if (const auto* VD = dyn_cast<VarDecl>(DRE->getDecl())) {
-        relevant_ranges_.push_back(getFullRange(VD->getDefinition()));
-      } else if (const auto* TD = dyn_cast<TagDecl>(DRE->getDecl())) {
-        relevant_ranges_.push_back(getFullRange(TD->getDefinition()));
+private:
+  auto rangeFromDecl(const Decl* D) {
+    // FIXME: LLVM ProgrammersManual says I should use InstVisitor instead?
+    if (const auto* FD = dyn_cast<FunctionDecl>(D)) {
+      return getFullRange(FD->getDefinition());
+    } else if (const auto* VD = dyn_cast<VarDecl>(D)) {
+      const auto* type = VD->getTypeSourceInfo()->getTypeLoc().getTypePtr();
+      assert(type);
+      if (const clang::RecordType* record_type = type->getAs<clang::RecordType>()) {
+        return getFullRange(record_type->getDecl());
       } else {
-        D->print(llvm::errs() << "[FATAL] No definitions found for ");
-        return false;
+      return getFullRange(VD->getDefinition());
+      }
+    } else if (const auto* TD = dyn_cast<TagDecl>(D)) {
+      return getFullRange(TD->getDefinition());
+    } else {
+      D->print(llvm::errs() << "[FATAL] No definitions found for ");
+      return CharSourceRange();
+    }
+  }
+
+public:
+  bool TraverseStmt(Stmt* S) {
+    if (S) {
+      if (const auto *DRE = dyn_cast<DeclRefExpr>(S)) {
+        // DRE->dump();
+        auto range = rangeFromDecl(DRE->getDecl());
+        assert(range.isValid());
+        relevant_ranges_.push_back(std::move(range));
       }
     }
     RecursiveASTVisitor<FindRangeVisitor>::TraverseStmt(S);

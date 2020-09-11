@@ -88,7 +88,7 @@ class FindRangeVisitor : public RecursiveASTVisitor<FindRangeVisitor> {
 public:
   explicit FindRangeVisitor(const ASTContext *Context)
     : context_(Context), sm_(&context_->getSourceManager()) {}
-  bool TraverseDecl(const Decl *D) {;
+  bool TraverseDecl(const Decl *D) {
     if (!context_) {
       llvm::outs() << "Context is NULL\n";
     } else {
@@ -99,6 +99,27 @@ public:
       relevant_ranges_.push_back(getFullRange(D));
     }
     RecursiveASTVisitor<FindRangeVisitor>::TraverseDecl(const_cast<Decl*>(D));
+    return true;
+  }
+
+  bool TraverseStmt(Stmt* S) {
+    assert(S);
+    if (const auto *DRE = dyn_cast<DeclRefExpr>(S)) {
+      // DRE->dump();
+      // FIXME: LLVM ProgrammersManual says I should use InstVisitor instead?
+      const auto* D = DRE->getDecl();
+      if (const auto* FD = dyn_cast<FunctionDecl>(D)) {
+        relevant_ranges_.push_back(getFullRange(FD->getDefinition()));
+      } else if (const auto* VD = dyn_cast<VarDecl>(DRE->getDecl())) {
+        relevant_ranges_.push_back(getFullRange(VD->getDefinition()));
+      } else if (const auto* TD = dyn_cast<TagDecl>(DRE->getDecl())) {
+        relevant_ranges_.push_back(getFullRange(TD->getDefinition()));
+      } else {
+        D->print(llvm::errs() << "[FATAL] No definitions found for ");
+        return false;
+      }
+    }
+    RecursiveASTVisitor<FindRangeVisitor>::TraverseStmt(S);
     return true;
   }
 
@@ -130,7 +151,7 @@ private:
     for (auto& range : relevant_ranges_) {
       assert(range.isValid());
       auto filename = sm_->getFilename(range.getBegin()).str();
-      if (source_to_ranges.find(filename) == source_to_ranges.end()) {
+      if (source_to_ranges.find(filename) != source_to_ranges.end()) {
         source_to_ranges[filename].push_back(&range);
       } else {
         source_to_ranges.emplace(filename, VecPtrType({&range}));
@@ -148,23 +169,32 @@ private:
     }
     return ret;
   }
-
-public:
-  void printToText () {
-    for (const auto& range : reduce()) {
-      auto source_text = Lexer::getSourceText(*range, *sm_, LangOptions()).str();
-      llvm::outs() << source_text;
-    }
-  }
+  friend llvm::raw_fd_ostream& operator<<(llvm::raw_fd_ostream& os, FindRangeVisitor& visitor);
 };
+
+
+llvm::raw_fd_ostream& operator<<(llvm::raw_fd_ostream& os, FindRangeVisitor& visitor) {
+  for (const auto& range : visitor.reduce()) {
+    os << Lexer::getSourceText(*range, *visitor.sm_, LangOptions()).str();
+  }
+  visitor.relevant_ranges_.clear();
+  return os;
+}
 
 class FunctionPrinter : public MatchFinder::MatchCallback {
 public:
   virtual void run(const MatchFinder::MatchResult &Result) override {
+    auto D = Result.Nodes.getNodeAs<FunctionDecl>("function");
     const ASTContext* context = Result.Context;
+    const auto* sm = &context->getSourceManager();
+    llvm::outs() << "=========== " <<
+        D->getNameAsString()
+        // Lexer::getSourceText(sm->getExpansionRange(D->getBeginLoc()),
+        //     *sm, LangOptions()).str()
+        << " ============\n";
     FindRangeVisitor visitor(context);
-    visitor.TraverseDecl(Result.Nodes.getNodeAs<FunctionDecl>("function"));
-    visitor.printToText();
+    visitor.TraverseDecl(D);
+    llvm::outs() << visitor;
   }
 };
 
